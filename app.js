@@ -4,15 +4,6 @@ const line = require('@line/bot-sdk');
 const { initDatabase } = require('./database');
 const { handleTextMessage } = require('./handlers/messageHandler');
 
-// LINE Bot 設定
-const config = {
-    channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
-    channelSecret: process.env.CHANNEL_SECRET,
-};
-
-// 建立 LINE Bot 客戶端
-const client = new line.Client(config);
-
 // 建立 Express 應用程式
 const app = express();
 
@@ -20,23 +11,67 @@ const app = express();
 app.get('/', (req, res) => {
     res.json({
         status: 'Jonas Pay Bot is running!',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        env_check: {
+            has_channel_secret: !!process.env.CHANNEL_SECRET,
+            has_access_token: !!process.env.CHANNEL_ACCESS_TOKEN
+        }
     });
 });
 
-// LINE Bot Webhook 端點
-app.post('/webhook', line.middleware(config), async (req, res) => {
-    try {
-        // 處理所有接收到的事件
-        const results = await Promise.all(req.body.events.map(handleEvent));
+// LINE Bot 設定和客戶端 - 在需要時才建立
+let client;
+let config;
 
-        // 記錄處理結果
-        console.log('事件處理完成:', results);
-        res.status(200).end();
-    } catch (error) {
-        console.error('Webhook 處理錯誤:', error);
-        res.status(500).end();
+function initLineBot() {
+    // 檢查環境變數
+    if (!process.env.CHANNEL_ACCESS_TOKEN || !process.env.CHANNEL_SECRET) {
+        console.error('❌ 環境變數檢查:');
+        console.error('CHANNEL_ACCESS_TOKEN:', process.env.CHANNEL_ACCESS_TOKEN ? '已設定' : '未設定');
+        console.error('CHANNEL_SECRET:', process.env.CHANNEL_SECRET ? '已設定' : '未設定');
+        throw new Error('❌ 請設定 CHANNEL_ACCESS_TOKEN 和 CHANNEL_SECRET 環境變數');
     }
+
+    config = {
+        channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+        channelSecret: process.env.CHANNEL_SECRET,
+    };
+
+    // 建立 LINE Bot 客戶端
+    client = new line.Client(config);
+
+    console.log('✅ LINE Bot 初始化完成');
+    return { client, config };
+}
+
+// LINE Bot Webhook 端點
+app.post('/webhook', (req, res) => {
+    // 延遲初始化 LINE Bot（如果還沒初始化）
+    if (!client) {
+        try {
+            const lineBot = initLineBot();
+            client = lineBot.client;
+            config = lineBot.config;
+        } catch (error) {
+            console.error('LINE Bot 初始化失敗:', error);
+            return res.status(500).json({ error: 'LINE Bot configuration error' });
+        }
+    }
+
+    // 使用 LINE middleware
+    line.middleware(config)(req, res, async () => {
+        try {
+            // 處理所有接收到的事件
+            const results = await Promise.all(req.body.events.map(handleEvent));
+
+            // 記錄處理結果
+            console.log('事件處理完成:', results);
+            res.status(200).end();
+        } catch (error) {
+            console.error('Webhook 處理錯誤:', error);
+            res.status(500).end();
+        }
+    });
 });
 
 // 處理 LINE 事件
@@ -323,21 +358,25 @@ async function initApp() {
         await initDatabase();
         console.log('✅ 資料庫初始化完成');
 
-        // 檢查環境變數
-        if (!process.env.CHANNEL_ACCESS_TOKEN || !process.env.CHANNEL_SECRET) {
-            throw new Error('❌ 請在 .env 檔案中設定 CHANNEL_ACCESS_TOKEN 和 CHANNEL_SECRET');
+        // 嘗試初始化 LINE Bot（但不強制）
+        try {
+            initLineBot();
+        } catch (error) {
+            console.warn('⚠️ LINE Bot 初始化延遲:', error.message);
+            console.log('💡 LINE Bot 將在第一次 webhook 呼叫時初始化');
         }
 
         // 啟動伺服器
         const port = process.env.PORT || 3000;
-        app.listen(port, () => {
+        app.listen(port, '0.0.0.0', () => {
             console.log(`🚀 Jonas Pay Bot 已啟動在 port ${port}`);
-            console.log(`📡 Webhook URL: http://localhost:${port}/webhook`);
+            console.log(`📡 Webhook URL: ${process.env.RAILWAY_STATIC_URL || 'http://localhost:' + port}/webhook`);
             console.log('💡 記得在 LINE Developers Console 設定 Webhook URL');
         });
 
     } catch (error) {
         console.error('❌ 應用程式啟動失敗:', error);
+        console.error('錯誤詳情:', error.message);
         process.exit(1);
     }
 }
